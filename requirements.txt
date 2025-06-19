@@ -1,0 +1,6 @@
+
+python-telegram-bot==21.0.1
+pymongo==4.6.1
+flask==3.0.0
+requests==2.31.0
+telegram

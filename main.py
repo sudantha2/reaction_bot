@@ -147,62 +147,132 @@ class BotManager:
             logger.error(f"Error sending signal from {bot_name}: {e}")
 
     def load_emojis_from_database(self):
-        """Load emojis from database"""
+        """Load emoji packs from database"""
         try:
-            emoji_doc = self.emoji_collection.find_one({"_id": "current_emojis"})
-            if emoji_doc and "emojis" in emoji_doc:
-                self.current_emojis = emoji_doc["emojis"]
-                logger.info(f"Loaded emojis from database: {self.current_emojis}")
+            # Load all emoji packs
+            emoji_packs = list(self.emoji_collection.find({"pack_name": {"$exists": True}}))
+            if not emoji_packs:
+                # Initialize with default pack
+                self.save_emoji_pack("emoji1", DEFAULT_EMOJIS)
+                self.current_emojis = DEFAULT_EMOJIS.copy()
+                logger.info(f"Initialized database with default emoji pack: {DEFAULT_EMOJIS}")
             else:
-                # Save default emojis to database
-                self.save_emojis_to_database(DEFAULT_EMOJIS)
-                logger.info(f"Initialized database with default emojis: {DEFAULT_EMOJIS}")
+                # Use first pack as default
+                self.current_emojis = emoji_packs[0].get("emojis", DEFAULT_EMOJIS)
+                logger.info(f"Loaded emoji packs from database, using first pack: {self.current_emojis}")
         except Exception as e:
-            logger.error(f"Error loading emojis from database: {e}")
+            logger.error(f"Error loading emoji packs from database: {e}")
             self.current_emojis = DEFAULT_EMOJIS.copy()
 
-    def save_emojis_to_database(self, emojis: List[str]):
-        """Save emojis to database"""
+    def save_emoji_pack(self, pack_name: str, emojis: List[str]):
+        """Save emoji pack to database"""
         try:
             self.emoji_collection.update_one(
-                {"_id": "current_emojis"},
-                {"$set": {"emojis": emojis}},
+                {"pack_name": pack_name},
+                {"$set": {"pack_name": pack_name, "emojis": emojis, "created_at": time.time()}},
                 upsert=True
             )
-            self.current_emojis = emojis.copy()
-            logger.info(f"Saved emojis to database: {emojis}")
+            logger.info(f"Saved emoji pack '{pack_name}' to database: {emojis}")
         except Exception as e:
-            logger.error(f"Error saving emojis to database: {e}")
+            logger.error(f"Error saving emoji pack '{pack_name}' to database: {e}")
+
+    def get_all_emoji_packs(self) -> List[dict]:
+        """Get all emoji packs from database"""
+        try:
+            return list(self.emoji_collection.find({"pack_name": {"$exists": True}}).sort("pack_name", 1))
+        except Exception as e:
+            logger.error(f"Error getting emoji packs from database: {e}")
+            return []
+
+    def assign_emoji_pack_to_bot(self, bot_name: str) -> List[str]:
+        """Assign a random emoji pack to a bot at startup"""
+        try:
+            import random
+            all_packs = self.get_all_emoji_packs()
+            
+            if not all_packs:
+                logger.info(f"No emoji packs found, using default for bot {bot_name}")
+                return DEFAULT_EMOJIS.copy()
+            
+            # Use bot name as seed for consistent pack selection per bot
+            random.seed(hash(bot_name) % (2**32))
+            selected_pack = random.choice(all_packs)
+            pack_emojis = selected_pack.get("emojis", DEFAULT_EMOJIS)
+            pack_name = selected_pack.get("pack_name", "unknown")
+            
+            logger.info(f"Bot {bot_name} assigned emoji pack '{pack_name}' with {len(pack_emojis)} emojis: {pack_emojis}")
+            return pack_emojis
+            
+        except Exception as e:
+            logger.error(f"Error assigning emoji pack to bot {bot_name}: {e}")
+            return DEFAULT_EMOJIS.copy()
+
+    def get_random_emoji_from_bot_pack(self, bot_name: str, message_id: str) -> str:
+        """Get a random emoji from the bot's assigned pack"""
+        try:
+            import random
+            
+            # Get bot's assigned pack
+            bot_pack = self.bot_emoji_assignment.get(bot_name, DEFAULT_EMOJIS)
+            
+            if not bot_pack:
+                return DEFAULT_EMOJIS[0] if DEFAULT_EMOJIS else "❤️"
+            
+            # Use message_id as seed for consistent randomness per message
+            random.seed(hash(f"{bot_name}_{message_id}") % (2**32))
+            selected_emoji = random.choice(bot_pack)
+            
+            logger.info(f"Bot {bot_name} selected emoji: {selected_emoji} from assigned pack")
+            return selected_emoji
+            
+        except Exception as e:
+            logger.error(f"Error getting random emoji for bot {bot_name}: {e}")
+            return DEFAULT_EMOJIS[0] if DEFAULT_EMOJIS else "❤️"
+
+    def get_random_pack_for_message(self, message_id: str) -> List[str]:
+        """Select one random emoji pack for a specific message"""
+        try:
+            import random
+            all_packs = self.get_all_emoji_packs()
+            
+            if not all_packs:
+                logger.info(f"No emoji packs found, using default for message {message_id}")
+                return DEFAULT_EMOJIS.copy()
+            
+            # Use message_id as seed for consistent pack selection per message
+            random.seed(hash(f"msg_{message_id}") % (2**32))
+            selected_pack = random.choice(all_packs)
+            pack_emojis = selected_pack.get("emojis", DEFAULT_EMOJIS)
+            pack_name = selected_pack.get("pack_name", "unknown")
+            
+            logger.info(f"Message {message_id} assigned emoji pack '{pack_name}' with {len(pack_emojis)} emojis: {pack_emojis}")
+            return pack_emojis
+            
+        except Exception as e:
+            logger.error(f"Error selecting pack for message {message_id}: {e}")
+            return DEFAULT_EMOJIS.copy()
 
     def assign_emoji_to_bot(self, bot_name: str, message_id: str) -> str:
-        """Assign a specific emoji to a bot for a message"""
-        # Create a unique key for this message
-        message_key = f"msg_{message_id}"
-
-        # Get all active bots
-        active_bots = list(_running_instances)
-        if not active_bots:
-            return self.current_emojis[0] if self.current_emojis else "❤️"
-
-        # Calculate which emoji this bot should use based on bot index
+        """Assign a random emoji to a bot for a message from the selected pack for this message"""
         try:
-            # Find bot index in the active bots list
-            if bot_name in [bot.get("name", "") for bot in self.get_all_bots()]:
-                bot_configs = self.get_all_bots()
-                bot_index = next((i for i, bot in enumerate(bot_configs) if bot.get("name") == bot_name), 0)
-            else:
-                bot_index = 0
-
-            # Assign emoji based on bot index and available emojis
-            emoji_index = bot_index % len(self.current_emojis)
-            assigned_emoji = self.current_emojis[emoji_index]
-
-            logger.info(f"Bot {bot_name} (index {bot_index}) assigned emoji: {assigned_emoji}")
-            return assigned_emoji
+            import random
+            
+            # Get the emoji pack selected for this specific message
+            message_pack = self.get_random_pack_for_message(message_id)
+            
+            if not message_pack:
+                return DEFAULT_EMOJIS[0] if DEFAULT_EMOJIS else "❤️"
+            
+            # Use bot_name + message_id as seed for consistent emoji selection per bot per message
+            random.seed(hash(f"{bot_name}_{message_id}") % (2**32))
+            selected_emoji = random.choice(message_pack)
+            
+            logger.info(f"Bot {bot_name} assigned emoji: {selected_emoji} from message pack")
+            return selected_emoji
 
         except Exception as e:
             logger.error(f"Error assigning emoji to bot {bot_name}: {e}")
-            return self.current_emojis[0] if self.current_emojis else "❤️"
+            return DEFAULT_EMOJIS[0] if DEFAULT_EMOJIS else "❤️"
 
     def create_flask_app(self, bot_name: str, port: int) -> Flask:
         """Create Flask app for signal handling"""
@@ -256,14 +326,20 @@ This bot is part of a reaction chain system. Here's how it works:
 • `/clone <BOT_TOKEN>` - Add a new bot to the chain (Main bot only)
 • `/clone_list` - Show all cloned bots and their status (Main bot only)
 • `/unclone @bot_username` - Remove a bot from the chain (Main bot only)
-• `/emoji [em1,em2,em3]` - Set custom reaction emojis (Main bot only)
+• `/emoji1 [em1,em2,em3]` - Set emoji pack 1 (Main bot only)
+• `/emoji2 [em1,em2,em3]` - Set emoji pack 2 (Main bot only)
+• `/emoji3 [em1,em2,em3]` - Set emoji pack 3 (Main bot only)
+• `/emoji_list` - Show all emoji packs (Main bot only)
+• `/del_emoji1` - Delete emoji pack 1 with confirmation (Main bot only)
+• `/del_emoji2` - Delete emoji pack 2 with confirmation (Main bot only)
 • `/custom <post_link>` - Set custom reactions for specific post (Main bot only)
 
 🔄 *How it works:*
-• In channels/groups: Each bot adds ONE emoji reaction per message
+• In channels/groups: Each bot adds ONE random emoji reaction per message
 • In private chats: Bots reply with their assigned emoji
-• Emojis are distributed among all connected bots
-• Each bot gets a specific emoji based on their position
+• Each bot is assigned ONE random emoji pack at startup
+• Bots use ONLY emojis from their assigned pack
+• Each message gets random emoji from bot's assigned pack
 
 ⚡ *Chain System:*
 • Bots are connected in a chain via HTTP signals
@@ -272,31 +348,48 @@ This bot is part of a reaction chain system. Here's how it works:
 
 💾 *Data:*
 • Bot configurations stored in MongoDB
-• Custom emojis saved in database
+• Multiple emoji packs saved in database
 • Automatic port assignment starting from 5000
 
 🏷️ *Usage:*
 • Add me to channels/groups to auto-react to all messages
-• Use `/emoji [🥰,❤️‍🔥,⚡]` to set custom emojis
-• Each bot will use one emoji per message
+• Use `/emoji1 [🥰,❤️‍🔥,⚡]` to set emoji pack 1
+• Use `/emoji2 [🔥,💯,⭐]` to set emoji pack 2
+• Bots will randomly select from all configured packs
         """
         await update.message.reply_text(help_text, parse_mode='Markdown')
 
-    async def emoji_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /emoji command to set custom emojis"""
-        logger.info(f"Emoji command received from user {update.effective_user.id}")
+    async def emoji_pack_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE, pack_number: int):
+        """Handle /emoji1, /emoji2, etc. commands to set emoji packs"""
+        pack_name = f"emoji{pack_number}"
+        logger.info(f"Emoji pack command received: {pack_name} from user {update.effective_user.id}")
 
         if not context.args:
-            current_emojis_str = ",".join(self.current_emojis)
-            await update.message.reply_text(
-                f"🎭 *Current Emojis:* {current_emojis_str}\n\n"
-                f"📝 *Usage:*\n"
-                f"`/emoji [emoji1,emoji2,emoji3,...]`\n\n"
-                f"📋 *Example:*\n"
-                f"`/emoji [🥰,❤️‍🔥,⚡,🔥,💯]`\n\n"
-                f"ℹ️ *Note:* Use square brackets and separate emojis with commas",
-                parse_mode='Markdown'
-            )
+            # Show current pack or instructions
+            all_packs = self.get_all_emoji_packs()
+            current_pack = next((pack for pack in all_packs if pack["pack_name"] == pack_name), None)
+            
+            if current_pack:
+                current_emojis_str = ",".join(current_pack["emojis"])
+                await update.message.reply_text(
+                    f"🎭 *{pack_name.upper()} Current Emojis:* {current_emojis_str}\n\n"
+                    f"📝 *Usage:*\n"
+                    f"`/{pack_name} [emoji1,emoji2,emoji3,...]`\n\n"
+                    f"📋 *Example:*\n"
+                    f"`/{pack_name} [🥰,❤️‍🔥,⚡,🔥,💯]`\n\n"
+                    f"ℹ️ *Note:* Use square brackets and separate emojis with commas",
+                    parse_mode='Markdown'
+                )
+            else:
+                await update.message.reply_text(
+                    f"🎭 *{pack_name.upper()} Pack Not Set*\n\n"
+                    f"📝 *Usage:*\n"
+                    f"`/{pack_name} [emoji1,emoji2,emoji3,...]`\n\n"
+                    f"📋 *Example:*\n"
+                    f"`/{pack_name} [🥰,❤️‍🔥,⚡,🔥,💯]`\n\n"
+                    f"ℹ️ *Note:* Use square brackets and separate emojis with commas",
+                    parse_mode='Markdown'
+                )
             return
 
         try:
@@ -307,8 +400,8 @@ This bot is part of a reaction chain system. Here's how it works:
             if not (emoji_input.startswith('[') and emoji_input.endswith(']')):
                 await update.message.reply_text(
                     "❌ *Invalid format!*\n"
-                    "Please use: `/emoji [emoji1,emoji2,emoji3]`\n"
-                    "Example: `/emoji [🥰,❤️‍🔥,⚡]`",
+                    f"Please use: `/{pack_name} [emoji1,emoji2,emoji3]`\n"
+                    f"Example: `/{pack_name} [🥰,❤️‍🔥,⚡]`",
                     parse_mode='Markdown'
                 )
                 return
@@ -328,26 +421,247 @@ This bot is part of a reaction chain system. Here's how it works:
                 await update.message.reply_text("❌ Too many emojis! Maximum 20 emojis allowed.")
                 return
 
-            # Save emojis to database
-            self.save_emojis_to_database(emoji_list)
+            # Save emoji pack to database
+            self.save_emoji_pack(pack_name, emoji_list)
 
-            # Reset bot emoji assignments
-            self.bot_emoji_assignment = {}
+            # Get total packs and emojis
+            all_packs = self.get_all_emoji_packs()
+            total_emojis = sum(len(pack.get("emojis", [])) for pack in all_packs)
 
             await update.message.reply_text(
-                f"✅ *Emojis updated successfully!*\n\n"
-                f"🎭 *New emojis:* {', '.join(emoji_list)}\n"
-                f"📊 *Total emojis:* {len(emoji_list)}\n"
+                f"✅ *{pack_name.upper()} Pack updated successfully!*\n\n"
+                f"🎭 *Pack emojis:* {', '.join(emoji_list)}\n"
+                f"📊 *Pack size:* {len(emoji_list)} emojis\n"
+                f"📦 *Total packs:* {len(all_packs)}\n"
+                f"🎯 *Total emojis:* {total_emojis}\n"
                 f"🤖 *Active bots:* {len(_running_instances)}\n\n"
-                f"ℹ️ Each bot will now use one emoji per message, distributed among all bots.",
+                f"ℹ️ Each bot uses ONE randomly assigned emoji pack!\n"
+                f"🔄 Restart bots to reassign packs if needed.",
                 parse_mode='Markdown'
             )
 
         except Exception as e:
-            logger.error(f"Error in emoji command: {e}")
+            logger.error(f"Error in emoji pack command {pack_name}: {e}")
             await update.message.reply_text(
-                f"❌ Error updating emojis: {str(e)}\n"
+                f"❌ Error updating emoji pack {pack_name}: {str(e)}\n"
                 "Please check the format and try again."
+            )
+
+    async def emoji_list_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /emoji_list command to show all emoji packs"""
+        logger.info(f"Emoji list command received from user {update.effective_user.id}")
+
+        try:
+            all_packs = self.get_all_emoji_packs()
+
+            if not all_packs:
+                await update.message.reply_text(
+                    "❌ No emoji packs found!\n\n"
+                    "💡 Use `/emoji1 [🥰,❤️‍🔥,⚡]` to create your first pack."
+                )
+                return
+
+            # Build the response message
+            message_lines = ["🎭 *Emoji Packs List*\n"]
+
+            total_emojis = 0
+            for pack in all_packs:
+                pack_name = pack.get("pack_name", "unknown")
+                pack_emojis = pack.get("emojis", [])
+                emoji_count = len(pack_emojis)
+                total_emojis += emoji_count
+                
+                # Limit display to first 10 emojis to avoid message length issues
+                display_emojis = pack_emojis[:10]
+                emoji_display = ", ".join(display_emojis)
+                if len(pack_emojis) > 10:
+                    emoji_display += f"... (+{len(pack_emojis) - 10} more)"
+
+                message_lines.append(
+                    f"*📦 {pack_name.upper()}*\n"
+                    f"   🎯 Count: {emoji_count} emojis\n"
+                    f"   🎭 Emojis: {emoji_display}\n"
+                )
+
+            # Add summary
+            message_lines.append(
+                f"\n📈 *Summary:*\n"
+                f"• Total Packs: {len(all_packs)}\n"
+                f"• Total Emojis: {total_emojis}\n"
+                f"• Active Bots: {len(_running_instances)}\n\n"
+                f"💡 *Usage:* Use `/emoji1`, `/emoji2`, etc. to set packs\n"
+                f"🗑️ *Delete:* Use `/del_emoji1`, `/del_emoji2`, etc. to delete packs\n"
+                f"🎲 *Reaction Mode:* Random selection from all packs"
+            )
+
+            # Join all lines and send
+            full_message = "\n".join(message_lines)
+
+            # Split message if too long (Telegram limit is 4096 characters)
+            if len(full_message) > 4000:
+                # Send in chunks
+                chunks = []
+                current_chunk = "🎭 *Emoji Packs List*\n\n"
+
+                for line in message_lines[1:]:  # Skip the header
+                    if len(current_chunk + line) > 3800:
+                        chunks.append(current_chunk)
+                        current_chunk = line
+                    else:
+                        current_chunk += line
+
+                if current_chunk:
+                    chunks.append(current_chunk)
+
+                for chunk in chunks:
+                    await update.message.reply_text(chunk, parse_mode='Markdown')
+            else:
+                await update.message.reply_text(full_message, parse_mode='Markdown')
+
+        except Exception as e:
+            logger.error(f"Error in emoji_list command: {e}")
+            await update.message.reply_text(
+                f"❌ Error retrieving emoji packs: {str(e)}\n"
+                "Please check the logs for more details."
+            )
+
+    async def delete_emoji_pack_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE, pack_number: int):
+        """Handle /del_emoji1, /del_emoji2, etc. commands to delete emoji packs with confirmation"""
+        pack_name = f"emoji{pack_number}"
+        logger.info(f"Delete emoji pack command received: {pack_name} from user {update.effective_user.id}")
+
+        try:
+            # Check if pack exists
+            all_packs = self.get_all_emoji_packs()
+            target_pack = next((pack for pack in all_packs if pack["pack_name"] == pack_name), None)
+            
+            if not target_pack:
+                await update.message.reply_text(
+                    f"❌ *{pack_name.upper()} Pack Not Found*\n\n"
+                    f"📋 This emoji pack doesn't exist or is already deleted.\n"
+                    f"💡 Use `/emoji_list` to see all available packs.",
+                    parse_mode='Markdown'
+                )
+                return
+
+            pack_emojis = target_pack.get("emojis", [])
+            emoji_display = ", ".join(pack_emojis[:10])
+            if len(pack_emojis) > 10:
+                emoji_display += f"... (+{len(pack_emojis) - 10} more)"
+
+            # Create confirmation buttons
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+            keyboard = [
+                [
+                    InlineKeyboardButton("✅ Yes, Delete", callback_data=f"delete_pack_{pack_name}"),
+                    InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_delete_{pack_name}")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await update.message.reply_text(
+                f"⚠️ *Delete Confirmation*\n\n"
+                f"🗑️ **Are you sure you want to delete {pack_name.upper()}?**\n\n"
+                f"📦 *Pack Details:*\n"
+                f"• Name: {pack_name.upper()}\n"
+                f"• Emojis: {len(pack_emojis)} total\n"
+                f"• Content: {emoji_display}\n\n"
+                f"⚠️ **This action cannot be undone!**\n"
+                f"🤖 All bots using this pack will be reassigned new packs.",
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+
+        except Exception as e:
+            logger.error(f"Error in delete emoji pack command {pack_name}: {e}")
+            await update.message.reply_text(
+                f"❌ Error processing delete command for {pack_name}: {str(e)}\n"
+                "Please check the logs for more details."
+            )
+
+    async def handle_delete_confirmation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle confirmation button clicks for deleting emoji packs"""
+        query = update.callback_query
+        await query.answer()
+
+        try:
+            callback_data = query.data
+            user_id = update.effective_user.id
+            
+            logger.info(f"Delete confirmation callback received: {callback_data} from user {user_id}")
+
+            if callback_data.startswith("delete_pack_"):
+                pack_name = callback_data.replace("delete_pack_", "")
+                
+                # Check if pack still exists
+                all_packs = self.get_all_emoji_packs()
+                target_pack = next((pack for pack in all_packs if pack["pack_name"] == pack_name), None)
+                
+                if not target_pack:
+                    await query.edit_message_text(
+                        f"❌ *Pack Already Deleted*\n\n"
+                        f"📋 {pack_name.upper()} was already deleted or doesn't exist.\n"
+                        f"💡 Use `/emoji_list` to see current packs.",
+                        parse_mode='Markdown'
+                    )
+                    return
+
+                # Delete the pack from database
+                result = self.emoji_collection.delete_one({"pack_name": pack_name})
+                
+                if result.deleted_count > 0:
+                    # Get updated stats
+                    remaining_packs = self.get_all_emoji_packs()
+                    total_emojis = sum(len(pack.get("emojis", [])) for pack in remaining_packs)
+                    
+                    # Reassign emoji packs to all bots
+                    reassigned_bots = []
+                    for bot_name in self.running_bots.keys():
+                        new_pack = self.assign_emoji_pack_to_bot(bot_name)
+                        self.bot_emoji_assignment[bot_name] = new_pack
+                        reassigned_bots.append(bot_name)
+
+                    await query.edit_message_text(
+                        f"✅ *Pack Deleted Successfully!*\n\n"
+                        f"🗑️ **Deleted:** {pack_name.upper()}\n"
+                        f"📊 **Updated Stats:**\n"
+                        f"• Remaining Packs: {len(remaining_packs)}\n"
+                        f"• Total Emojis: {total_emojis}\n"
+                        f"• Reassigned Bots: {len(reassigned_bots)}\n\n"
+                        f"🔄 All bots have been reassigned new emoji packs!\n"
+                        f"💡 Use `/emoji_list` to see remaining packs.",
+                        parse_mode='Markdown'
+                    )
+                    
+                    logger.info(f"Successfully deleted emoji pack {pack_name} and reassigned {len(reassigned_bots)} bots")
+                else:
+                    await query.edit_message_text(
+                        f"❌ *Delete Failed*\n\n"
+                        f"🔄 Could not delete {pack_name.upper()}.\n"
+                        f"📋 The pack may have been already deleted.\n"
+                        f"💡 Use `/emoji_list` to check current packs.",
+                        parse_mode='Markdown'
+                    )
+
+            elif callback_data.startswith("cancel_delete_"):
+                pack_name = callback_data.replace("cancel_delete_", "")
+                
+                await query.edit_message_text(
+                    f"✅ *Delete Cancelled*\n\n"
+                    f"🛡️ {pack_name.upper()} pack has been preserved.\n"
+                    f"📋 No changes were made to your emoji packs.\n"
+                    f"💡 Use `/emoji_list` to see all your packs.",
+                    parse_mode='Markdown'
+                )
+                
+                logger.info(f"Delete cancelled for emoji pack {pack_name} by user {user_id}")
+
+        except Exception as e:
+            logger.error(f"Error in delete confirmation handler: {e}")
+            await query.edit_message_text(
+                f"❌ Error processing confirmation: {str(e)}\n"
+                "Please try again or check the logs for more details."
             )
 
     async def clone_list_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -403,23 +717,35 @@ This bot is part of a reaction chain system. Here's how it works:
                     except:
                         next_bot_info = "Configured"
 
+                # Get bot's assigned emoji pack
+                bot_pack_info = "Not assigned"
+                if bot_name in self.bot_emoji_assignment:
+                    pack_emojis = self.bot_emoji_assignment[bot_name][:5]  # Show first 5 emojis
+                    bot_pack_info = f"{', '.join(pack_emojis)}{'...' if len(self.bot_emoji_assignment[bot_name]) > 5 else ''}"
+
                 message_lines.append(
                     f"*{i}. {bot_name}*\n"
                     f"   🤖 Username: {bot_username}\n"
                     f"   🔌 Port: {bot_port}\n"
                     f"   📊 Status: {status}\n"
+                    f"   🎭 Emoji Pack: {bot_pack_info}\n"
                     f"   🔗 Next Bot: {next_bot_info}\n"
                     f"   🎯 Token: {bot_token[:15]}...\n"
                 )
 
             # Add summary
             running_count = len([bot for bot in all_bots if bot.get('token') in active_tokens])
+            # Get emoji pack summary
+            all_emoji_packs = self.get_all_emoji_packs()
+            total_emojis = sum(len(pack.get("emojis", [])) for pack in all_emoji_packs)
+            
             message_lines.append(
                 f"\n📈 *Summary:*\n"
                 f"• Total Bots: {len(all_bots)}\n"
                 f"• Running: {running_count}\n"
                 f"• Stopped: {len(all_bots) - running_count}\n"
-                f"• Current Emojis: {', '.join(self.current_emojis)}"
+                f"• Emoji Packs: {len(all_emoji_packs)}\n"
+                f"• Total Emojis: {total_emojis}"
             )
 
             # Join all lines and send
@@ -460,20 +786,20 @@ This bot is part of a reaction chain system. Here's how it works:
             # https://t.me/channel_name/123
             # https://t.me/c/123456789/123
             # https://telegram.me/channel_name/123
-            
+
             if 't.me/' in post_url or 'telegram.me/' in post_url:
                 # Extract the path part
                 if 't.me/' in post_url:
                     path = post_url.split('t.me/')[-1]
                 else:
                     path = post_url.split('telegram.me/')[-1]
-                
+
                 parts = path.split('/')
-                
+
                 if len(parts) >= 2:
                     channel_part = parts[0]
                     message_id = parts[1]
-                    
+
                     # Handle private channel format: c/123456789/123
                     if channel_part == 'c' and len(parts) >= 3:
                         chat_id = f"-100{parts[1]}"
@@ -481,13 +807,13 @@ This bot is part of a reaction chain system. Here's how it works:
                     else:
                         # Public channel format: @channel_name/123
                         chat_id = f"@{channel_part}" if not channel_part.startswith('@') else channel_part
-                    
+
                     return {
                         'chat_id': chat_id,
                         'message_id': int(message_id),
                         'original_url': post_url
                     }
-            
+
             return None
         except Exception as e:
             logger.error(f"Error parsing post link: {e}")
@@ -496,7 +822,7 @@ This bot is part of a reaction chain system. Here's how it works:
     async def remove_bot_reactions(self, chat_id: str, message_id: int):
         """Remove all reactions from bots on a specific message"""
         removed_count = 0
-        
+
         for bot_name, bot_info in self.running_bots.items():
             try:
                 application = bot_info.get('application')
@@ -512,7 +838,7 @@ This bot is part of a reaction chain system. Here's how it works:
                     logger.info(f"Removed reactions from {bot_name} on message {message_id}")
             except Exception as e:
                 logger.error(f"Error removing reactions from {bot_name}: {e}")
-        
+
         return removed_count
 
     async def custom_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -558,7 +884,7 @@ This bot is part of a reaction chain system. Here's how it works:
 
             # Remove existing bot reactions
             removed_count = await self.remove_bot_reactions(chat_id, message_id)
-            
+
             # Store pending custom post info
             self.pending_custom_posts[user_id] = {
                 'chat_id': chat_id,
@@ -585,13 +911,13 @@ This bot is part of a reaction chain system. Here's how it works:
     async def handle_custom_emoji_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
         """Handle emoji input for custom posts. Returns True if handled, False otherwise"""
         user_id = update.effective_user.id
-        
+
         # Check if user has a pending custom post
         if user_id not in self.pending_custom_posts:
             return False
 
         message_text = update.message.text
-        
+
         # Check if message contains emoji list format
         if not (message_text.startswith('[') and message_text.endswith(']')):
             return False
@@ -662,38 +988,38 @@ This bot is part of a reaction chain system. Here's how it works:
     async def apply_custom_reactions(self, chat_id: str, message_id: int, emoji_list: List[str]) -> int:
         """Apply custom reactions to a specific post using available bots"""
         applied_count = 0
-        
+
         # Get available bots
         running_bot_names = list(self.running_bots.keys())
-        
+
         for i, bot_name in enumerate(running_bot_names):
             try:
                 bot_info = self.running_bots[bot_name]
                 application = bot_info.get('application')
-                
+
                 if application and application.bot:
                     # Assign emoji based on bot index
                     emoji_index = i % len(emoji_list)
                     assigned_emoji = emoji_list[emoji_index]
-                    
+
                     from telegram import ReactionTypeEmoji
-                    
+
                     await application.bot.set_message_reaction(
                         chat_id=chat_id,
                         message_id=message_id,
                         reaction=[ReactionTypeEmoji(emoji=assigned_emoji)],
                         is_big=False
                     )
-                    
+
                     applied_count += 1
                     logger.info(f"Applied custom reaction {assigned_emoji} from {bot_name}")
-                    
+
                     # Small delay between reactions
                     await asyncio.sleep(0.5)
-                    
+
             except Exception as e:
                 logger.error(f"Error applying custom reaction from {bot_name}: {e}")
-        
+
         return applied_count
 
     def get_custom_post_emojis(self, chat_id: str, message_id: int) -> Optional[List[str]]:
@@ -703,10 +1029,10 @@ This bot is part of a reaction chain system. Here's how it works:
                 'chat_id': str(chat_id),
                 'message_id': int(message_id)
             })
-            
+
             if custom_post:
                 return custom_post.get('custom_emojis', [])
-            
+
             return None
         except Exception as e:
             logger.error(f"Error getting custom post emojis: {e}")
@@ -729,7 +1055,7 @@ This bot is part of a reaction chain system. Here's how it works:
 
         try:
             target_username = context.args[0].strip()
-            
+
             # Remove @ if present
             if target_username.startswith('@'):
                 target_username = target_username[1:]
@@ -737,7 +1063,7 @@ This bot is part of a reaction chain system. Here's how it works:
             # Find bot by username
             target_bot = None
             all_bots = self.get_all_bots()
-            
+
             await update.message.reply_text("🔍 Searching for bot...")
 
             for bot in all_bots:
@@ -794,7 +1120,7 @@ This bot is part of a reaction chain system. Here's how it works:
 
             # Get the bot that was pointing to this bot
             previous_bot = self.bots_collection.find_one({"next_url": f"http://0.0.0.0:{bot_port}/signal"})
-            
+
             # Get the bot this bot was pointing to
             next_url = target_bot.get('next_url', '')
 
@@ -965,19 +1291,19 @@ This bot is part of a reaction chain system. Here's how it works:
 
             # Check if this is a custom post with specific emojis
             custom_emojis = self.get_custom_post_emojis(str(message.chat_id), message.message_id)
-            
+
             if custom_emojis:
                 # Use custom emojis for this specific post
                 logger.info(f"Using custom emojis for post {message.message_id}: {custom_emojis}")
-                
+
                 # Get bot index for emoji assignment
                 all_bots = self.get_all_bots()
                 bot_index = next((i for i, bot in enumerate(all_bots) if bot.get("name") == bot_name), 0)
                 emoji_index = bot_index % len(custom_emojis)
                 assigned_emoji = custom_emojis[emoji_index]
-                
+
             else:
-                # Use regular emoji assignment
+                # Use random emoji assignment from all packs
                 assigned_emoji = self.assign_emoji_to_bot(bot_name, str(message.message_id))
 
             if is_channel_or_group:
@@ -986,7 +1312,7 @@ This bot is part of a reaction chain system. Here's how it works:
                 try:
                     # Import ReactionTypeEmoji for proper emoji reactions
                     from telegram import ReactionTypeEmoji
-                    
+
                     # Use the correct method for setting reactions with proper emoji format
                     await context.bot.set_message_reaction(
                         chat_id=message.chat_id,
@@ -1013,11 +1339,11 @@ This bot is part of a reaction chain system. Here's how it works:
                 handled_custom = await self.handle_custom_emoji_input(update, context)
                 if handled_custom:
                     return  # Don't continue with regular reaction logic
-                
+
                 # Regular private chat reactions
                 try:
                     from telegram import ReactionTypeEmoji
-                    
+
                     await context.bot.set_message_reaction(
                         chat_id=message.chat_id,
                         message_id=message.message_id,
@@ -1077,11 +1403,31 @@ This bot is part of a reaction chain system. Here's how it works:
 
             if is_main_bot:
                 application.add_handler(CommandHandler("clone", self.clone_command))
-                application.add_handler(CommandHandler("emoji", self.emoji_command))
+                
+                # Add multiple emoji pack handlers (emoji1 through emoji10)
+                for i in range(1, 11):
+                    application.add_handler(CommandHandler(
+                        f"emoji{i}", 
+                        lambda update, context, num=i: self.emoji_pack_command(update, context, num)
+                    ))
+                
+                application.add_handler(CommandHandler("emoji_list", self.emoji_list_command))
                 application.add_handler(CommandHandler("clone_list", self.clone_list_command))
                 application.add_handler(CommandHandler("unclone", self.unclone_command))
                 application.add_handler(CommandHandler("custom", self.custom_command))
-                logger.info(f"Added clone, emoji, clone_list, unclone, and custom commands to bot {bot_name}")
+                
+                # Add delete emoji pack handlers (del_emoji1 through del_emoji10)
+                for i in range(1, 11):
+                    application.add_handler(CommandHandler(
+                        f"del_emoji{i}", 
+                        lambda update, context, num=i: self.delete_emoji_pack_command(update, context, num)
+                    ))
+                
+                # Add callback query handler for confirmation buttons
+                from telegram.ext import CallbackQueryHandler
+                application.add_handler(CallbackQueryHandler(self.handle_delete_confirmation))
+                
+                logger.info(f"Added clone, emoji packs (1-10), emoji_list, clone_list, unclone, custom, and delete emoji commands to bot {bot_name}")
 
             # Handle all types of messages (private, group, channel posts)
             application.add_handler(MessageHandler(
@@ -1092,12 +1438,17 @@ This bot is part of a reaction chain system. Here's how it works:
             # Create Flask app for signals
             flask_app = self.create_flask_app(bot_name, port)
 
+            # Assign emoji pack to this bot
+            bot_emoji_pack = self.assign_emoji_pack_to_bot(bot_name)
+            self.bot_emoji_assignment[bot_name] = bot_emoji_pack
+
             # Store bot info
             self.running_bots[bot_name] = {
                 "application": application,
                 "flask_app": flask_app,
                 "port": port,
-                "config": bot_config
+                "config": bot_config,
+                "emoji_pack": bot_emoji_pack
             }
 
             # Start Flask server in thread
